@@ -1,5 +1,5 @@
 [package]
-name = "screeps-starter-rust"
+name = "swarm"
 version = "0.0.0"
 authors = []
 edition = "2021"
@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 js-sys = "0.3"
 log = "0.4"
 fern = "0.6"
-screeps-game-api = "0.21"
+screeps-game-api = { version = "0.21", features = ["sim"] }
 # If you'd like to use a locally-cloned out version of the game API crate
 # (for testing PRs, etc), you can use a local path (replacing the above line):
 #screeps-game-api = { path = "../screeps-game-api" }

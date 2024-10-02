@@ -1,5 +1,5 @@
 {
-  "name": "screeps-starter-rust",
+  "name": "swarm",
   "version": "0.1.0",
   "description": "",
   "files": [
@@ -9,15 +9,6 @@
   "scripts": {
     "deploy": "node js_tools/deploy.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/rustyscreeps/screeps-starter-rust.git"
-  },
-  "author": "",
-  "bugs": {
-    "url": "https://github.com/rustyscreeps/screeps-starter-rust/issues"
-  },
-  "homepage": "https://github.com/rustyscreeps/screeps-starter-rust",
   "screeps_bot": true,
   "dependencies": {
     "fastestsmallesttextencoderdecoder-encodeinto": "^1.0.22"

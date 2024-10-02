@@ -100,7 +100,7 @@ pub fn game_loop() {
         }
     }
 
-    info!("done! cpu: {}", game::cpu::get_used())
+    info!("sheep done! cpu: {}", game::cpu::get_used())
 }
 
 fn run_creep(creep: &Creep, creep_targets: &mut HashMap<String, CreepTarget>) {

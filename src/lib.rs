@@ -10,29 +10,37 @@ use screeps::{
     enums::StructureObject,
     find, game,
     local::ObjectId,
-    objects::{Creep, Source, StructureController},
+    objects::{Creep, Source, StructureController, StructureSpawn, ConstructionSite},
     prelude::*,
+    HasId, // Add this import at the top of the file
+    MaybeHasId, // Add MaybeHasId to the import
 };
 use wasm_bindgen::prelude::*;
 
 mod logging;
 
-// this is one way to persist data between ticks within Rust's memory, as opposed to
-// keeping state in memory on game objects - but will be lost on global resets!
-thread_local! {
-    static CREEP_TARGETS: RefCell<HashMap<String, CreepTarget>> = RefCell::new(HashMap::new());
+// Define CreepRole enum
+#[derive(Clone, Debug)]
+enum CreepRole {
+    Builder,
+    Worker,
 }
 
-static INIT_LOGGING: std::sync::Once = std::sync::Once::new();
-
-// this enum will represent a creep's lock on a specific target object, storing a js reference
-// to the object id so that we can grab a fresh reference to the object each successive tick,
-// since screeps game objects become 'stale' and shouldn't be used beyond the tick they were fetched
+// Update CreepTarget enum
 #[derive(Clone)]
 enum CreepTarget {
     Upgrade(ObjectId<StructureController>),
     Harvest(ObjectId<Source>),
+    Build(ObjectId<ConstructionSite>),
+    FillSpawn(ObjectId<StructureSpawn>),
 }
+
+// Update thread_local storage to include role
+thread_local! {
+    static CREEP_INFO: RefCell<HashMap<String, (CreepRole, Option<CreepTarget>)>> = RefCell::new(HashMap::new());
+}
+
+static INIT_LOGGING: std::sync::Once = std::sync::Once::new();
 
 // add wasm_bindgen to any function you would like to expose for call from js
 // to use a reserved name as a function name, use `js_name`:
@@ -45,13 +53,11 @@ pub fn game_loop() {
 
     debug!("loop starting! CPU: {}", game::cpu::get_used());
 
-    // mutably borrow the creep_targets refcell, which is holding our creep target locks
-    // in the wasm heap
-    CREEP_TARGETS.with(|creep_targets_refcell| {
-        let mut creep_targets = creep_targets_refcell.borrow_mut();
+    CREEP_INFO.with(|creep_info_refcell| {
+        let mut creep_info = creep_info_refcell.borrow_mut();
         debug!("running creeps");
         for creep in game::creeps().values() {
-            run_creep(&creep, &mut creep_targets);
+            run_creep(&creep, &mut creep_info);
         }
     });
 
@@ -62,11 +68,18 @@ pub fn game_loop() {
 
         let body = [Part::Move, Part::Move, Part::Carry, Part::Work];
         if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
-            // create a unique name, spawn.
             let name_base = game::time();
             let name = format!("{}-{}", name_base, additional);
+            let role = if additional % 2 == 0 { CreepRole::Builder } else { CreepRole::Worker };
+            
             match spawn.spawn_creep(&body, &name) {
-                Ok(()) => additional += 1,
+                Ok(()) => {
+                    CREEP_INFO.with(|creep_info_refcell| {
+                        let mut creep_info = creep_info_refcell.borrow_mut();
+                        creep_info.insert(name.clone(), (role, None));
+                    });
+                    additional += 1;
+                },
                 Err(e) => warn!("couldn't spawn: {:?}", e),
             }
         }
@@ -103,70 +116,125 @@ pub fn game_loop() {
     info!("sheep done! cpu: {}", game::cpu::get_used())
 }
 
-fn run_creep(creep: &Creep, creep_targets: &mut HashMap<String, CreepTarget>) {
+fn run_creep(creep: &Creep, creep_info: &mut HashMap<String, (CreepRole, Option<CreepTarget>)>) {
     if creep.spawning() {
         return;
     }
     let name = creep.name();
     debug!("running creep {}", name);
 
-    let target = creep_targets.entry(name);
+    let (role, target) = creep_info.entry(name.clone())
+        .or_insert_with(|| (CreepRole::Worker, None));
+
+    // Function to make the creep say its role
+    let say_role = |creep: &Creep, role: &CreepRole| {
+        let role_name = match role {
+            CreepRole::Builder => "Builder",
+            CreepRole::Worker => "Worker",
+        };
+        creep.say(role_name, false);
+    };
+
     match target {
-        Entry::Occupied(entry) => {
-            let creep_target = entry.get();
-            match creep_target {
-                CreepTarget::Upgrade(controller_id)
-                    if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 =>
-                {
-                    if let Some(controller) = controller_id.resolve() {
-                        creep
-                            .upgrade_controller(&controller)
-                            .unwrap_or_else(|e| match e {
-                                ErrorCode::NotInRange => {
-                                    let _ = creep.move_to(&controller);
-                                }
-                                _ => {
-                                    warn!("couldn't upgrade: {:?}", e);
-                                    entry.remove();
-                                }
-                            });
-                    } else {
-                        entry.remove();
-                    }
-                }
-                CreepTarget::Harvest(source_id)
-                    if creep.store().get_free_capacity(Some(ResourceType::Energy)) > 0 =>
-                {
-                    if let Some(source) = source_id.resolve() {
-                        if creep.pos().is_near_to(source.pos()) {
-                            creep.harvest(&source).unwrap_or_else(|e| {
-                                warn!("couldn't harvest: {:?}", e);
-                                entry.remove();
-                            });
-                        } else {
-                            let _ = creep.move_to(&source);
+        Some(CreepTarget::Upgrade(controller_id)) if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 => {
+            say_role(creep, role);
+            if let Some(controller) = controller_id.resolve() {
+                creep
+                    .upgrade_controller(&controller)
+                    .unwrap_or_else(|e| match e {
+                        ErrorCode::NotInRange => {
+                            let _ = creep.move_to(&controller);
                         }
-                    } else {
-                        entry.remove();
-                    }
-                }
-                _ => {
-                    entry.remove();
-                }
-            };
+                        _ => {
+                            warn!("couldn't upgrade: {:?}", e);
+                            *target = None;
+                        }
+                    });
+            } else {
+                *target = None;
+            }
         }
-        Entry::Vacant(entry) => {
-            // no target, let's find one depending on if we have energy
+        Some(CreepTarget::Harvest(source_id)) if creep.store().get_free_capacity(Some(ResourceType::Energy)) > 0 => {
+            say_role(creep, role);
+            if let Some(source) = source_id.resolve() {
+                if creep.pos().is_near_to(source.pos()) {
+                    creep.harvest(&source).unwrap_or_else(|e| {
+                        warn!("couldn't harvest: {:?}", e);
+                        *target = None;
+                    });
+                } else {
+                    let _ = creep.move_to(&source);
+                }
+            } else {
+                *target = None;
+            }
+        }
+        Some(CreepTarget::Build(site_id)) if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 => {
+            say_role(creep, role);
+            if let Some(site) = site_id.resolve() {
+                creep.build(&site).unwrap_or_else(|e| match e {
+                    ErrorCode::NotInRange => {
+                        let _ = creep.move_to(&site);
+                    }
+                    _ => {
+                        warn!("couldn't build: {:?}", e);
+                        *target = None;
+                    }
+                });
+            } else {
+                *target = None;
+            }
+        }
+        Some(CreepTarget::FillSpawn(spawn_id)) if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 => {
+            say_role(creep, role);
+            if let Some(spawn) = spawn_id.resolve() {
+                creep.transfer(&spawn, ResourceType::Energy, None).unwrap_or_else(|e| match e {
+                    ErrorCode::NotInRange => {
+                        let _ = creep.move_to(&spawn);
+                    }
+                    _ => {
+                        warn!("couldn't transfer energy: {:?}", e);
+                        *target = None;
+                    }
+                });
+            } else {
+                *target = None;
+            }
+        }
+        _ => {
+            // No target or invalid target, find a new one
             let room = creep.room().expect("couldn't resolve creep room");
+            
             if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
-                for structure in room.find(find::STRUCTURES, None).iter() {
-                    if let StructureObject::StructureController(controller) = structure {
-                        entry.insert(CreepTarget::Upgrade(controller.id()));
-                        break;
+                match role {
+                    CreepRole::Builder => {
+                        if let Some(site) = room.find(find::CONSTRUCTION_SITES, None).first() {
+                            if let Some(id) = site.try_id() {
+                                *target = Some(CreepTarget::Build(id));
+                                say_role(creep, role);
+                            } else {
+                                warn!("Construction site has no id");
+                            }
+                        } else if let Some(controller) = room.controller() {
+                            *target = Some(CreepTarget::Upgrade(controller.id()));
+                            say_role(creep, role);
+                        }
+                    }
+                    CreepRole::Worker => {
+                        if let Some(spawn) = room.find(find::MY_SPAWNS, None).first() {
+                            if spawn.store().get_free_capacity(Some(ResourceType::Energy)) > 0 {
+                                *target = Some(CreepTarget::FillSpawn(spawn.id()));
+                                say_role(creep, role);
+                            } else if let Some(controller) = room.controller() {
+                                *target = Some(CreepTarget::Upgrade(controller.id()));
+                                say_role(creep, role);
+                            }
+                        }
                     }
                 }
             } else if let Some(source) = room.find(find::SOURCES_ACTIVE, None).first() {
-                entry.insert(CreepTarget::Harvest(source.id()));
+                *target = Some(CreepTarget::Harvest(source.id()));
+                say_role(creep, role);
             }
         }
     }
